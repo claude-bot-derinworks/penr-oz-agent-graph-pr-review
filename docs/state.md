@@ -11,8 +11,8 @@ from agent_graph import State
 state = State(pr_number=42, files=["runtime.py"])
 after = state.update(review="LGTM")
 
-state.get("review")   # None — the old snapshot is untouched
-after["review"]       # "LGTM"
+state.get("review")  # None — the old snapshot is untouched
+after["review"]  # "LGTM"
 State.from_json(after.to_json()) == after  # True — snapshots round-trip through JSON
 ```
 
