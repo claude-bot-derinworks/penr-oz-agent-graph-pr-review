@@ -64,6 +64,16 @@ def test_to_json_rejects_unserializable_values() -> None:
         State(handler=object()).to_json()
 
 
+def test_to_json_rejects_tuples_that_would_restore_as_lists() -> None:
+    with pytest.raises(ValueError, match=r"\['point'\] would not survive"):
+        State(point=(1, 2), ok="fine").to_json()
+
+
+def test_to_json_rejects_nested_non_string_mapping_keys() -> None:
+    with pytest.raises(ValueError, match=r"\['index'\] would not survive"):
+        State(index={1: "one"}).to_json()
+
+
 def test_from_json_rejects_non_object_payloads() -> None:
     with pytest.raises(ValueError, match="expected a JSON object"):
         State.from_json("[1, 2, 3]")

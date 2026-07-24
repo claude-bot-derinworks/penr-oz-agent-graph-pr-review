@@ -62,9 +62,23 @@ class State(Mapping[str, Any]):
     def to_json(self) -> str:
         """Serialize to a JSON object string.
 
-        Raises ``TypeError`` if any channel value is not JSON-serializable.
+        Raises ``TypeError`` if a channel value is not JSON-serializable, and
+        ``ValueError`` if a value would not survive the round trip unchanged —
+        JSON silently turns tuples into lists and non-string mapping keys into
+        strings, which would corrupt a restored checkpoint.
         """
-        return json.dumps(self._channels, sort_keys=True)
+        payload = json.dumps(self._channels, sort_keys=True)
+        restored = json.loads(payload)
+        if restored != self._channels:
+            lossy = sorted(
+                name for name, value in self._channels.items() if restored[name] != value
+            )
+            raise ValueError(
+                f"channels {lossy} would not survive a JSON round trip unchanged "
+                "(tuples become lists, non-string mapping keys become strings); "
+                "store JSON-native values instead"
+            )
+        return payload
 
     @classmethod
     def from_json(cls, payload: str) -> State:

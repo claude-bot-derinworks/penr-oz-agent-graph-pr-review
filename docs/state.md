@@ -54,6 +54,9 @@ Two consequences of the choice:
   snapshot that shares it — treat channel values as immutable, replacing rather than mutating
   them (`update(files=[*state["files"], new_file])`).
 - **Serialization is the contract.** Checkpointing means `to_json()` / `from_json()`, so channel
-  names are strings and values must be JSON-serializable. This is enforced when a snapshot is
-  serialized, not on construction, so in-memory-only runs may carry richer values at their own
-  risk.
+  names are strings and values must be JSON-native. `to_json()` refuses values JSON cannot
+  represent (`TypeError`) and, because a checkpoint that restores to different data is worse
+  than no checkpoint, also values JSON would silently alter (`ValueError`): tuples restore as
+  lists, and mappings with non-string keys restore with string keys. This is enforced when a
+  snapshot is serialized, not on construction, so in-memory-only runs may carry richer values
+  at their own risk.
