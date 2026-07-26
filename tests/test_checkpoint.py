@@ -28,6 +28,14 @@ def test_checkpoint_rejects_unsafe_run_ids() -> None:
             checkpoint(run_id=run_id)
 
 
+def test_checkpoint_rejects_run_ids_containing_newlines() -> None:
+    # A `$` anchor also matches before a trailing newline, so an id straight
+    # off readline() must not slip through and mint its own run directory.
+    for run_id in ["pr-42\n", "pr-42\r\n", "pr\n42", "pr-42\n\n", "pr-42\nx"]:
+        with pytest.raises(ValueError, match="run_id"):
+            checkpoint(run_id=run_id)
+
+
 def test_checkpoint_rejects_negative_step() -> None:
     with pytest.raises(ValueError, match="step"):
         checkpoint(step=-1)
@@ -100,8 +108,17 @@ def test_unknown_run_has_no_checkpoints(checkpointer: Checkpointer) -> None:
 
 
 def test_unsaveable_run_id_has_no_checkpoints(checkpointer: Checkpointer) -> None:
-    assert checkpointer.load_latest("../escape") is None
-    assert checkpointer.load_history("../escape") == []
+    for run_id in ["../escape", "pr-42\n", "pr\n42"]:
+        assert checkpointer.load_latest(run_id) is None
+        assert checkpointer.load_history(run_id) == []
+
+
+def test_file_newline_run_id_never_reaches_the_filesystem(tmp_path: Path) -> None:
+    root = tmp_path / "checkpoints"
+    saver = FileCheckpointer(root)
+    saver.save(checkpoint(run_id="pr-42", step=0))
+    assert saver.load_latest("pr-42\n") is None
+    assert [path.name for path in root.iterdir()] == ["pr-42"]
 
 
 def test_save_rejects_non_increasing_steps(checkpointer: Checkpointer) -> None:

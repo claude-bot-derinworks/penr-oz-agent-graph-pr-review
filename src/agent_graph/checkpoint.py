@@ -20,7 +20,7 @@ from agent_graph.state import State
 
 __all__ = ["Checkpoint", "Checkpointer", "FileCheckpointer", "MemoryCheckpointer"]
 
-_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 _FIELDS = ("node", "run_id", "state", "step")
 
@@ -41,7 +41,10 @@ class Checkpoint:
     state: State
 
     def __post_init__(self) -> None:
-        if not isinstance(self.run_id, str) or not _RUN_ID.match(self.run_id):
+        # fullmatch, not match: `$` also matches before a trailing newline, so
+        # `match` would accept "pr-42\n" (e.g. an id straight off readline())
+        # and mint a second, near-invisible run directory beside "pr-42".
+        if not isinstance(self.run_id, str) or not _RUN_ID.fullmatch(self.run_id):
             raise ValueError(
                 f"run_id must match {_RUN_ID.pattern!r} so any backend can key on it, "
                 f"got {self.run_id!r}"
@@ -172,7 +175,7 @@ class FileCheckpointer(Checkpointer):
     def _run_dir(self, run_id: str) -> Path | None:
         # An id Checkpoint would reject can never have been saved (and must
         # not be used as a path), so its run directory is treated as absent.
-        if not isinstance(run_id, str) or not _RUN_ID.match(run_id):
+        if not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id):
             return None
         return self._root / run_id
 
