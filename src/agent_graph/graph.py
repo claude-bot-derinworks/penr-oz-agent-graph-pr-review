@@ -19,7 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import Final
 
-from agent_graph.checkpoint import Checkpoint, Checkpointer
+from agent_graph.checkpoint import Checkpoint, Checkpointer, check_run_id
 from agent_graph.state import State
 
 __all__ = ["DEFAULT_STEP_BUDGET", "END", "Graph", "GraphError", "StepBudgetExceeded"]
@@ -149,20 +149,50 @@ class Graph:
         At most ``step_budget`` nodes run; a run that still has not reached
         :data:`END` raises :class:`StepBudgetExceeded`. When ``checkpointer`` is
         given, a checkpoint is saved after each node completes, so a killed run
-        can be inspected — or later resumed — from the last node that actually
-        finished; ``run_id`` names that run and is required alongside it.
+        can be inspected — or resumed — from the last node that actually
+        finished; ``run_id`` names that run and is required alongside it, and is
+        checked for backend-portability before any node runs, so an unusable id
+        cannot cost an API call on its way to failing.
+
+        **Resuming is what a repeated ``run_id`` means.** If that run already
+        has checkpoints, the walk picks up at the node its last checkpoint's
+        edge leads to, rather than at the entry node — so the entry node's side
+        effects are not repeated — and three things follow from taking the
+        checkpoint as the run's position:
+
+        - The checkpointed state wins: ``state`` is the input for a run that has
+          not started yet, and is ignored by one that has. Resuming from
+          anything but the last completed node's own output would make the
+          history a replay of a run that never happened.
+        - The step counter continues from ``step + 1``, so ``step_budget``
+          bounds the run as a whole — a restart is not a fresh budget — and the
+          checkpointer's strictly increasing steps keep holding.
+        - Nothing runs at all if that edge already leads to :data:`END`; the
+          finished run's final state comes straight back.
+
+        Pass a ``run_id`` of its own to a run that should start from scratch.
         """
         if not isinstance(state, State):
             raise TypeError(f"state must be a State, got {type(state).__name__}")
         if not isinstance(step_budget, int) or isinstance(step_budget, bool) or step_budget < 1:
             raise ValueError(f"step_budget must be a positive int, got {step_budget!r}")
-        if checkpointer is not None and run_id is None:
-            raise ValueError("run_id is required when a checkpointer is given")
+        if checkpointer is not None:
+            if run_id is None:
+                raise ValueError("run_id is required when a checkpointer is given")
+            # Before validate(), and well before the entry node: an id no
+            # Checkpoint could carry dooms the run, so it must not be found out
+            # only once a node has already done irreversible work.
+            check_run_id(run_id)
         self.validate()
 
         current = self._entry
         assert current is not None  # validate() proved it
         steps = 0
+        if checkpointer is not None:
+            assert run_id is not None  # guarded above
+            latest = checkpointer.load_latest(run_id)
+            if latest is not None:
+                state, current, steps = self._resume_from(latest)
         while current != END:
             if steps >= step_budget:
                 raise StepBudgetExceeded(
@@ -181,6 +211,20 @@ class Graph:
             steps += 1
             current = self._next(current, state)
         return state
+
+    def _resume_from(self, latest: Checkpoint) -> tuple[State, str, int]:
+        """Return the state, node, and step count a run picks up with.
+
+        The checkpoint records the node that *finished*, so where to go next is
+        that node's outgoing edge — asked again, of the state the node left
+        behind, exactly as the first attempt would have asked it.
+        """
+        if latest.node not in self._nodes:
+            raise GraphError(
+                f"cannot resume run {latest.run_id!r}: its latest checkpoint names node "
+                f"{latest.node!r}, which this graph does not define"
+            )
+        return latest.state, self._next(latest.node, latest.state), latest.step + 1
 
     def _next(self, node: str, state: State) -> str:
         """Name the node that follows ``node`` given ``state``."""

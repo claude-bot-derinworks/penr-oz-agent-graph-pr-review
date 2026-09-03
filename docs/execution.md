@@ -110,3 +110,22 @@ Each pass through a cycle is its own checkpoint, so the history is the run's tim
 than a per-node overwrite. Because a checkpoint is written as its node finishes, a run that
 aborts on its step budget still leaves the full history of what did run — which is usually
 how you find the channel the router was waiting on.
+
+## Resuming
+
+Invoking again with a `run_id` that already has checkpoints resumes that run instead of
+restarting it: the walk begins at whatever the last checkpoint's node routes to, carrying
+that checkpoint's state, and the step counter continues from `step + 1`.
+
+Reusing a run id *is* the resume request — there is no separate flag. The alternative,
+resuming only when asked, makes the accident the default: a restarted process that passes
+its run id through would re-run the entry node's side effect, then hit the checkpointer's
+strictly-increasing-step rule and fail on the write. Starting over is the case that can say
+so unambiguously, by naming a run of its own.
+
+Two consequences worth stating. The checkpointed state wins over the `state` argument,
+which is the input for a run that has not started and is ignored by one that has — resuming
+from anything but the last completed node's own output would leave a history of a run that
+never happened. And the step budget bounds the run, not the attempt: a resumed run inherits
+the steps already spent, because the budget is a ceiling on what the run may cost and a
+restart does not refund what the first attempt already paid.

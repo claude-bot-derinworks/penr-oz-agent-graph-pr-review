@@ -2,6 +2,7 @@ import pytest
 
 from agent_graph import (
     END,
+    Checkpoint,
     Graph,
     GraphError,
     MemoryCheckpointer,
@@ -314,3 +315,117 @@ def test_checkpoints_survive_a_run_that_aborts_on_its_budget() -> None:
     history = checkpointer.load_history("doomed")
     assert [cp.step for cp in history] == [0, 1, 2]
     assert history[-1].state["count"] == 3
+
+
+# --- resuming ------------------------------------------------------------------
+
+
+def test_a_killed_run_resumes_from_its_last_checkpoint() -> None:
+    checkpointer = MemoryCheckpointer()
+    calls: list[str] = []
+    fuse = ["b"]  # the process dies the first time node "b" runs
+
+    def node(tag: str):
+        def run(state: State) -> State:
+            calls.append(tag)
+            if fuse and fuse[0] == tag:
+                fuse.pop()
+                raise RuntimeError(f"process killed while running {tag!r}")
+            return state.update(trail=[*state.get("trail", []), tag])
+
+        return run
+
+    graph = (
+        Graph()
+        .add_node("a", node("a"))
+        .add_node("b", node("b"))
+        .add_node("c", node("c"))
+        .add_edge("a", "b")
+        .add_edge("b", "c")
+        .add_edge("c", END)
+        .set_entry_point("a")
+    )
+    with pytest.raises(RuntimeError, match="process killed"):
+        graph.invoke(State(), run_id="pr-42", checkpointer=checkpointer)
+    assert calls == ["a", "b"]
+    assert [(cp.step, cp.node) for cp in checkpointer.load_history("pr-42")] == [(0, "a")]
+
+    # The restart hands back the latest checkpoint, exactly as docs/checkpointing.md shows.
+    latest = checkpointer.load_latest("pr-42")
+    assert latest is not None
+    resumed = graph.invoke(latest.state, run_id="pr-42", checkpointer=checkpointer)
+
+    assert calls == ["a", "b", "b", "c"]  # "a" is not re-executed
+    assert resumed["trail"] == ["a", "b", "c"]
+    assert [(cp.step, cp.node) for cp in checkpointer.load_history("pr-42")] == [
+        (0, "a"),
+        (1, "b"),
+        (2, "c"),
+    ]
+
+
+def test_a_resumed_run_continues_the_step_counter_and_state_of_the_checkpoint() -> None:
+    checkpointer = MemoryCheckpointer()
+    checkpointer.save(Checkpoint("pr-7", 4, "a", State(trail=["a"])))
+    graph = (
+        Graph()
+        .add_node("a", append("a"))
+        .add_node("b", append("b"))
+        .add_edge("a", "b")
+        .add_edge("b", END)
+        .set_entry_point("a")
+    )
+
+    final = graph.invoke(State(trail=["ignored"]), run_id="pr-7", checkpointer=checkpointer)
+
+    assert final["trail"] == ["a", "b"]  # the checkpointed state wins over the argument
+    assert [(cp.step, cp.node) for cp in checkpointer.load_history("pr-7")] == [(4, "a"), (5, "b")]
+
+
+def test_a_resumed_run_does_not_get_a_fresh_step_budget() -> None:
+    checkpointer = MemoryCheckpointer()
+    graph = Graph().add_node("spin", counter).add_edge("spin", "spin").set_entry_point("spin")
+    with pytest.raises(StepBudgetExceeded):
+        graph.invoke(State(count=0), step_budget=3, run_id="doomed", checkpointer=checkpointer)
+
+    with pytest.raises(StepBudgetExceeded):
+        graph.invoke(State(count=0), step_budget=3, run_id="doomed", checkpointer=checkpointer)
+    assert [cp.step for cp in checkpointer.load_history("doomed")] == [0, 1, 2]  # nothing ran
+
+    with pytest.raises(StepBudgetExceeded):
+        graph.invoke(State(count=0), step_budget=5, run_id="doomed", checkpointer=checkpointer)
+    history = checkpointer.load_history("doomed")
+    assert [cp.step for cp in history] == [0, 1, 2, 3, 4]  # a raised budget spends the remainder
+    assert history[-1].state["count"] == 5
+
+
+def test_resuming_a_finished_run_runs_nothing_and_returns_its_final_state() -> None:
+    checkpointer = MemoryCheckpointer()
+    graph = Graph().add_node("only", counter).add_edge("only", END).set_entry_point("only")
+    final = graph.invoke(State(count=0), run_id="done", checkpointer=checkpointer)
+
+    assert graph.invoke(State(count=99), run_id="done", checkpointer=checkpointer) == final
+    assert [cp.step for cp in checkpointer.load_history("done")] == [0]
+
+
+def test_resuming_a_run_whose_checkpointed_node_is_gone_is_rejected() -> None:
+    checkpointer = MemoryCheckpointer()
+    checkpointer.save(Checkpoint("pr-9", 0, "retired", State()))
+    graph = Graph().add_node("a", counter).add_edge("a", END).set_entry_point("a")
+
+    with pytest.raises(GraphError, match="cannot resume run 'pr-9'"):
+        graph.invoke(State(), run_id="pr-9", checkpointer=checkpointer)
+
+
+def test_an_unusable_run_id_is_rejected_before_any_node_runs() -> None:
+    ran: list[str] = []
+
+    def node(state: State) -> State:
+        ran.append("a")  # stands in for an irreversible API call
+        return state
+
+    graph = Graph().add_node("a", node).add_edge("a", END).set_entry_point("a")
+
+    with pytest.raises(ValueError, match="run_id must match"):
+        graph.invoke(State(), run_id="../bad", checkpointer=MemoryCheckpointer())
+    assert ran == []
